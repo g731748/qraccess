@@ -4,10 +4,13 @@
  * =========================================
  * עצמאית, 100% בבעלותך. ללא תלות בספק.
  *
- * חדש בגרסה 6:
- *   • מסד נתונים קבוע (PostgreSQL) — הלקוחות נשמרים לתמיד,
- *     ושום עדכון גרסה לא מוחק אותם יותר!
- *   • אם DATABASE_URL מוגדר → נשמר ב-Postgres. אחרת → קובץ מקומי (לפיתוח).
+ * חדש בגרסה 7:
+ *   • קליטת תגי NFC בשתי דרכים:
+ *     1) ידנית/מהנייד — מזינים את ה-UID שקראת עם הנייד
+ *     2) אוטומטית מהקורא — הקורא שולח סריקה, והתג האחרון שנקרא
+ *        מופיע לשיוך בלחיצה (כשתג לא מוכר נסרק, הוא נשמר ל-60 שניות)
+ *
+ * גרסה 6: מסד נתונים קבוע (PostgreSQL) — הלקוחות נשמרים לתמיד.
  *
  * גרסאות קודמות: היררכיית הרשאות, קודים, NFC, חלונות זמן,
  *   דשבורד, חיפוש, וואטסאפ, ניהול סיסמאות ואיפוס.
@@ -20,7 +23,12 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = '6.0';
+const VERSION = '7.0';
+
+// זיכרון קצר של התג האחרון שנסרק ולא זוהה — לקליטה אוטומטית מהקורא
+// לכל לקוח (tenant) נשמר התג האחרון, לתקופה קצרה
+const lastUnknownTag = {}; // tenantId -> { uid, ts }
+const TAG_ENROLL_WINDOW = 60 * 1000; // 60 שניות
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'data', 'db.json');
 const DATABASE_URL = process.env.DATABASE_URL || '';
@@ -150,6 +158,12 @@ const server = http.createServer(async (req, res) => {
     } else if (raw.startsWith('NFC:')) {
       method = 'nfc'; const nfc = raw.slice(4); user = Object.values(db.users).find(x => x.nfcId && x.nfcId === nfc);
       if (user) { if (!user.active) reason = 'מושבת'; else if (!withinWindow(user)) reason = 'מחוץ לחלון זמן'; else { result = 'granted'; reason = ''; } }
+      else {
+        // תג לא מוכר — נשמור אותו לקליטה אוטומטית. הקורא שולח tenantId/doorId
+        let tid = b.tenantId || null;
+        if (!tid && b.doorId && db.doors[b.doorId]) tid = db.doors[b.doorId].tenantId;
+        if (tid) { lastUnknownTag[tid] = { uid: nfc, ts: Date.now() }; reason = 'תג לא רשום (זמין לשיוך)'; }
+      }
     } else {
       method = 'qr'; const [uid, code] = raw.split('.'); user = db.users[uid];
       if (user) { if (!user.active) reason = 'מושבת'; else if (!withinWindow(user)) reason = 'מחוץ לחלון זמן'; else if (!code || !verifyTotp(user.secret, code)) reason = 'קוד לא תקף'; else { result = 'granted'; reason = ''; } }
@@ -217,6 +231,12 @@ const server = http.createServer(async (req, res) => {
   if (S.role === 'admin') {
     const a = db.admins[S.adminId]; if (!a || !a.active) return send(res, 200, loginPage(), 'text/html');
     const has = k => !!a.perms[k]; const tid = S.tenantId;
+    // קליטת תג אוטומטית: מחזיר את התג האחרון שנסרק בקורא ולא זוהה (לשיוך)
+    if (p === '/api/last-tag' && m === 'GET') {
+      const t = lastUnknownTag[tid];
+      if (t && Date.now() - t.ts < TAG_ENROLL_WINDOW) return send(res, 200, { uid: t.uid, ageSec: Math.floor((Date.now() - t.ts) / 1000) });
+      return send(res, 200, { uid: null });
+    }
     // מנהל משנה את הסיסמה של עצמו
     if (p === '/api/self/password' && m === 'POST') {
       const b = await readBody(req);
@@ -547,7 +567,35 @@ async function toggle(id,active){await fetch('/api/users/'+id,{method:'POST',hea
 async function rename(id,cur){const name=prompt('שם חדש:',cur);if(name&&name.trim()){await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name.trim()})});loadUsers();}}
 async function del(id,name){if(confirm('למחוק את '+name+'?')){await fetch('/api/users/'+id,{method:'DELETE'});loadUsers();}}
 async function resetAccess(id,name){if(confirm('לאפס גישה ל'+name+'?\\nה-QR הישן וכל קוד ישן יפסיקו לעבוד, וייווצר QR חדש.')){await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({resetAccess:true})});loadUsers();alert('הגישה אופסה ✓ שלח למשתמש את ה-QR החדש (כפתור QR/וואטסאפ).');}}
-async function setNfc(id){const nfcId=prompt('מזהה כרטיס/צ׳יפ NFC (UID). ריק = הסרה:','');if(nfcId===null)return;await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nfcId:nfcId.trim()})});loadUsers();}
+let tagPollTimer=null;
+function setNfc(id){
+  const u=USERS.find(x=>x.id===id);
+  let html='<h3>שיוך תג/כרטיס NFC — '+(u?u.name:'')+'</h3>';
+  html+='<p class="muted">שתי דרכים לקלוט את מספר התג (UID):</p>';
+  html+='<div style="border:1px solid #e2e8f0;border-radius:12px;padding:12px;margin-bottom:12px">';
+  html+='<b>1. קליטה מהקורא (אוטומטי)</b><div class="muted" style="margin:4px 0 8px">הצמד את התג לקורא בדלת, והמספר יופיע כאן.</div>';
+  html+='<button class="ghost sm" style="width:100%" onclick="startTagListen()">🔄 התחל להאזין לקורא</button>';
+  html+='<div id="tagStatus" class="muted" style="margin-top:8px"></div></div>';
+  html+='<div style="border:1px solid #e2e8f0;border-radius:12px;padding:12px;margin-bottom:12px">';
+  html+='<b>2. הזנה ידנית / מהנייד</b><div class="muted" style="margin:4px 0 8px">קרא עם אפליקציית NFC בנייד והקלד כאן:</div>';
+  html+='<input id="nfcManual" placeholder="UID (למשל 04A3B2C1)" value="'+(u&&u.nfcId?u.nfcId:'')+'"></div>';
+  html+='<div class="btns"><button class="primary sm" style="flex:1" onclick="saveNfc(\\''+id+'\\')">שמור תג</button>';
+  if(u&&u.nfcId)html+='<button class="danger sm" onclick="clearNfc(\\''+id+'\\')">הסר תג</button>';
+  html+='<button class="ghost sm" onclick="stopTagListen();closeModal()">סגור</button></div>';
+  openModal(html);
+}
+function startTagListen(){
+  const st=document.getElementById('tagStatus'); st.textContent='⏳ ממתין לתג... הצמד עכשיו לקורא.';
+  if(tagPollTimer)clearInterval(tagPollTimer);
+  tagPollTimer=setInterval(async()=>{
+    try{const r=await (await fetch('/api/last-tag')).json();
+      if(r.uid){document.getElementById('nfcManual').value=r.uid;st.innerHTML='✓ זוהה תג: <b>'+r.uid+'</b> — לחץ "שמור תג".';stopTagListen();}
+    }catch(e){}
+  },1500);
+}
+function stopTagListen(){if(tagPollTimer){clearInterval(tagPollTimer);tagPollTimer=null;}}
+async function saveNfc(id){const nfcId=document.getElementById('nfcManual').value.trim();if(!nfcId){alert('אין UID');return;}stopTagListen();await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nfcId})});closeModal();loadUsers();}
+async function clearNfc(id){stopTagListen();await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nfcId:''})});closeModal();loadUsers();}
 async function setWindow(id){const ans=prompt('חלון זמן. "תמיד" לגישה חופשית.\\nדוגמה: 0,1,2,3,4 08:00 18:00','תמיד');if(ans===null)return;let win=null;if(ans.trim()!=='תמיד'){const pr=ans.trim().split(/\\s+/);win={days:(pr[0]||'').split(',').map(x=>parseInt(x)).filter(x=>!isNaN(x)),from:pr[1]||'00:00',to:pr[2]||'23:59'};}await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({window:win})});loadUsers();}
 async function issueCode(id){
   let types=[]; if(can('code_permanent'))types.push(['permanent','קבוע']); if(can('code_temporary'))types.push(['temporary','זמני 24ש']); if(can('code_onetime'))types.push(['onetime','חד-פעמי']);
@@ -596,4 +644,4 @@ async function tick(){try{const r=await (await fetch('/api/qr/${user.id}')).json
   qr.clear();qr.makeCode(r.payload);document.getElementById('sec').textContent=r.secondsLeft;document.getElementById('bar').style.width=(r.secondsLeft/${STEP_SECONDS}*100)+'%';}catch(e){}}
 tick();setInterval(tick,1000);
 </script>`);
-        }
+}
