@@ -23,7 +23,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = '9.0';
+const VERSION = '10.0';
 // סוגי תגי NFC/RFID נתמכים
 const TAG_TYPES = { '125khz': 'תג 125kHz (EM/קירבה)', '13.56mhz': 'תג 13.56MHz (Mifare/NFC)' };
 
@@ -40,6 +40,7 @@ const SUPER_USER = process.env.SUPER_USER || 'michael';
 const SUPER_PASSWORD = process.env.SUPER_PASSWORD || 'michael2026';
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(16).toString('hex');
 
+// הרשאות שאתה (על-מנהל) נותן למנהל-לקוח. מנהל יכול לתת למשתמשים רק ממה שיש לו.
 const PERMS = {
   manage_users:   'ניהול משתמשים (הוספה/עריכה/מחיקה)',
   issue_qr:       'הנפקת QR מתחלף',
@@ -48,8 +49,18 @@ const PERMS = {
   code_temporary: 'קוד זמני',
   code_onetime:   'קוד חד-פעמי',
   use_nfc:        'כרטיס/צ׳יפ NFC',
+  remote_open:    'פתיחה מרחוק',
   time_windows:   'חלונות זמן',
   view_log:       'צפייה ביומן כניסות',
+};
+
+// אמצעי כניסה שמנהל-לקוח מקצה לכל משתמש קצה. כל אחד דורש שלמנהל יש את ההרשאה המתאימה.
+// access flag בצד המשתמש  ->  הרשאת מנהל שנדרשת כדי לתת אותו
+const ACCESS_METHODS = {
+  allow_qr:     { label: 'כניסה ב-QR',        needs: 'issue_qr'    },
+  allow_code:   { label: 'כניסה בקוד מספרי',   needs: 'issue_code'  },
+  allow_nfc:    { label: 'כניסה בתג/NFC',      needs: 'use_nfc'     },
+  allow_remote: { label: 'פתיחה מרחוק',        needs: 'remote_open' },
 };
 
 function freshDB() { return { tenants: {}, admins: {}, users: {}, doors: {}, log: [] }; }
@@ -154,14 +165,16 @@ const server = http.createServer(async (req, res) => {
   if (p === '/api/verify' && m === 'POST') {
     const b = await readBody(req); const raw = (b.payload || '').trim();
     let user = null, method = 'qr', result = 'denied', reason = 'לא מזוהה';
+    // אמצעי כניסה מורשה למשתמש? (ברירת מחדל true למשתמשים ישנים ללא access)
+    const allowed = (u, key) => !u.access || u.access[key] !== false;
     if (raw.startsWith('CODE:')) {
       method = 'code'; const code = raw.slice(5); user = Object.values(db.users).find(x => x.code && x.code === code);
-      if (user) { if (!user.active) reason = 'מושבת'; else if (user.codeType === 'temporary' && user.codeExp && Date.now() > user.codeExp) reason = 'קוד פג'; else if (!withinWindow(user)) reason = 'מחוץ לחלון זמן'; else { result = 'granted'; reason = ''; if (user.codeType === 'onetime') { user.code = null; user.codeType = null; } } }
+      if (user) { if (!user.active) reason = 'מושבת'; else if (!allowed(user, 'allow_code')) reason = 'כניסה בקוד לא מורשית'; else if (user.codeType === 'temporary' && user.codeExp && Date.now() > user.codeExp) reason = 'קוד פג'; else if (!withinWindow(user)) reason = 'מחוץ לחלון זמן'; else { result = 'granted'; reason = ''; if (user.codeType === 'onetime') { user.code = null; user.codeType = null; } } }
     } else if (raw.startsWith('NFC:')) {
       method = 'nfc'; const nfc = raw.slice(4); user = Object.values(db.users).find(x => x.nfcId && x.nfcId === nfc);
       // סוג התג שהקורא מדווח (125khz / 13.56mhz) — אם נשלח
       var tagType = (b.tagType && TAG_TYPES[b.tagType]) ? b.tagType : null;
-      if (user) { if (!user.active) reason = 'מושבת'; else if (!withinWindow(user)) reason = 'מחוץ לחלון זמן'; else { result = 'granted'; reason = ''; } }
+      if (user) { if (!user.active) reason = 'מושבת'; else if (!allowed(user, 'allow_nfc')) reason = 'כניסה בתג לא מורשית'; else if (!withinWindow(user)) reason = 'מחוץ לחלון זמן'; else { result = 'granted'; reason = ''; } }
       else {
         // תג לא מוכר — נשמור אותו לקליטה אוטומטית. הקורא שולח tenantId/doorId + סוג
         let tid = b.tenantId || null;
@@ -170,7 +183,7 @@ const server = http.createServer(async (req, res) => {
       }
     } else {
       method = 'qr'; const [uid, code] = raw.split('.'); user = db.users[uid];
-      if (user) { if (!user.active) reason = 'מושבת'; else if (!withinWindow(user)) reason = 'מחוץ לחלון זמן'; else if (!code || !verifyTotp(user.secret, code)) reason = 'קוד לא תקף'; else { result = 'granted'; reason = ''; } }
+      if (user) { if (!user.active) reason = 'מושבת'; else if (!allowed(user, 'allow_qr')) reason = 'כניסה ב-QR לא מורשית'; else if (!withinWindow(user)) reason = 'מחוץ לחלון זמן'; else if (!code || !verifyTotp(user.secret, code)) reason = 'קוד לא תקף'; else { result = 'granted'; reason = ''; } }
     }
     db.log.unshift({ ts: Date.now(), tenantId: user ? user.tenantId : null, userId: user ? user.id : null, userName: user ? user.name : 'לא ידוע', method, result, reason, tagType: (method === 'nfc' ? (user && user.nfcType ? user.nfcType : (typeof tagType !== 'undefined' ? tagType : null)) : null), doorId: b.doorId || null });
     db.log = db.log.slice(0, 2000); saveDB();
@@ -182,7 +195,10 @@ const server = http.createServer(async (req, res) => {
   if (p === '/api/me') {
     if (S.role === 'super') return send(res, 200, { role: 'super', version: VERSION, user: SUPER_USER, permDefs: PERMS, stats: todayStats(null), tenantCount: Object.keys(db.tenants).length });
     const a = db.admins[S.adminId]; if (!a) return send(res, 401, { error: 'לא מחובר' });
-    return send(res, 200, { role: 'admin', version: VERSION, name: a.name, tenantName: db.tenants[S.tenantId] ? db.tenants[S.tenantId].name : '', perms: Object.keys(a.perms).filter(k => a.perms[k]), maxUsers: a.maxUsers, permDefs: PERMS, stats: todayStats(S.tenantId) });
+    // אילו אמצעי כניסה המנהל רשאי להקצות למשתמשים (רק מה שיש לו)
+    const grantable = {};
+    Object.entries(ACCESS_METHODS).forEach(([k, def]) => { if (a.perms[def.needs]) grantable[k] = def.label; });
+    return send(res, 200, { role: 'admin', version: VERSION, name: a.name, tenantName: db.tenants[S.tenantId] ? db.tenants[S.tenantId].name : '', perms: Object.keys(a.perms).filter(k => a.perms[k]), maxUsers: a.maxUsers, permDefs: PERMS, grantable, stats: todayStats(S.tenantId) });
   }
 
   // ========== SUPER ==========
@@ -249,13 +265,24 @@ const server = http.createServer(async (req, res) => {
       const x = makePass(b.newPassword); a.salt = x.salt; a.passHash = x.passHash; saveDB();
       return send(res, 200, { ok: true });
     }
+    // פתיחה מרחוק ע"י המנהל (דורש הרשאת remote_open). בפועל תשלח פקודה לחומרה כשתחובר.
+    if (p === '/api/remote-open' && m === 'POST') {
+      if (!has('remote_open')) return send(res, 403, { ok: false, error: 'אין הרשאת פתיחה מרחוק' });
+      db.log.unshift({ ts: Date.now(), tenantId: tid, userId: null, userName: a.name + ' (מנהל)', method: 'remote', result: 'granted', reason: 'פתיחה מרחוק', tagType: null, doorId: null });
+      db.log = db.log.slice(0, 2000); saveDB();
+      // TODO: כאן תישלח הפקודה לקורא/ממסר (CT9 HTTP / Shelly) כשהחומרה תחובר
+      return send(res, 200, { ok: true });
+    }
     if (p === '/api/users' && m === 'GET') return send(res, 200, Object.values(db.users).filter(x => x.tenantId === tid));
     if (p === '/api/users' && m === 'POST') {
       if (!has('manage_users')) return send(res, 403, { error: 'אין הרשאה' });
       const count = Object.values(db.users).filter(x => x.tenantId === tid).length;
       if (count >= a.maxUsers) return send(res, 403, { error: `הגעת למכסה (${a.maxUsers})` });
       const b = await readBody(req); const id = 'u' + crypto.randomBytes(3).toString('hex');
-      db.users[id] = { id, tenantId: tid, name: b.name || 'משתמש', phone: b.phone || '', secret: newSecret(), code: null, codeType: null, codeExp: null, nfcId: null, nfcType: null, active: true, window: null, createdAt: Date.now() };
+      // ברירת מחדל: המשתמש מקבל כל אמצעי כניסה שהמנהל מורשה לתת
+      const access = {};
+      Object.entries(ACCESS_METHODS).forEach(([k, def]) => { access[k] = has(def.needs); });
+      db.users[id] = { id, tenantId: tid, name: b.name || 'משתמש', phone: b.phone || '', secret: newSecret(), code: null, codeType: null, codeExp: null, nfcId: null, nfcType: null, access, active: true, window: null, createdAt: Date.now() };
       saveDB(); return send(res, 200, db.users[id]);
     }
     if (p.startsWith('/api/users/') && p.endsWith('/code') && m === 'POST') {
@@ -276,6 +303,13 @@ const server = http.createServer(async (req, res) => {
       if ('window' in b && has('time_windows')) user.window = b.window;
       if ('nfcId' in b && has('use_nfc')) { user.nfcId = b.nfcId || null; if ('nfcType' in b) user.nfcType = b.nfcType || null; if (!user.nfcId) user.nfcType = null; }
       if (typeof b.phone === 'string') user.phone = b.phone.trim();
+      // עדכון אמצעי כניסה למשתמש — רק מה שהמנהל מורשה לתת (אכיפת שרשרת ההרשאות)
+      if (b.access && typeof b.access === 'object') {
+        if (!user.access) user.access = {};
+        Object.entries(ACCESS_METHODS).forEach(([k, def]) => {
+          if (k in b.access) { user.access[k] = has(def.needs) ? !!b.access[k] : false; }
+        });
+      }
       if (b.resetAccess) { user.secret = newSecret(); user.code = null; user.codeType = null; } // איפוס: QR חדש, מבטל קוד ישן
       saveDB(); return send(res, 200, user);
     }
@@ -496,6 +530,13 @@ function adminPage() {
   return shell('ניהול אתר', `
 <div class="nav"><span class="badge">🏢 <span id="tname">…</span></span><a href="#" onclick="changeMyPass();return false;">🔑 שנה סיסמה</a><a href="#" onclick="logout();return false;">התנתק</a><span class="ver">גרסה <span id="ver">…</span></span></div>
 <h1 id="title">ניהול כניסה</h1><p class="sub" id="whoami"></p>
+
+<div class="card" id="remoteCard" style="display:none;text-align:center">
+  <button onclick="remoteOpen()" style="width:120px;height:120px;border-radius:50%;background:#185fa5;color:#fff;font-size:15px;border:0;cursor:pointer">🔓<br>פתח דלת</button>
+  <div class="muted" style="margin-top:8px">פתיחה מרחוק</div>
+  <div id="remoteStatus" style="margin-top:6px;font-size:14px"></div>
+</div>
+
 <div class="stats" id="stats"></div>
 
 <div class="card" id="addcard" style="display:none">
@@ -537,7 +578,14 @@ async function init(){
   if(can('manage_users'))document.getElementById('addcard').style.display='block';
   if(can('issue_code'))document.getElementById('guestWrap').style.display='block';
   if(can('view_log'))document.getElementById('logcard').style.display='block';
+  if(can('remote_open'))document.getElementById('remoteCard').style.display='block';
   await loadUsers(); if(can('view_log'))loadLog();
+}
+async function remoteOpen(){
+  const st=document.getElementById('remoteStatus'); st.textContent='⏳ פותח...';
+  const r=await (await fetch('/api/remote-open',{method:'POST'})).json();
+  if(r.ok){st.innerHTML='<span class="g">✓ נפתח</span>';setTimeout(()=>st.textContent='',2500);if(can('view_log'))loadLog();}
+  else st.innerHTML='<span class="r">'+(r.error||'שגיאה')+'</span>';
 }
 async function loadUsers(){USERS=await (await fetch('/api/users')).json(); if(can('manage_users'))document.getElementById('quota').textContent='משתמשים: '+USERS.length+' / '+ME.maxUsers; render();}
 function render(){
@@ -549,16 +597,20 @@ function render(){
     let codeInfo=''; if(u.code){const ct={permanent:'קבוע',temporary:'זמני',onetime:'חד-פעמי'}[u.codeType]||'';codeInfo='<div class="muted">קוד '+ct+': <b style="font-size:16px;color:#1f3a5f">'+u.code+'</b></div>';}
     let tagTypeName={'125khz':'125kHz','13.56mhz':'13.56MHz'}[u.nfcType]||'';
     let nfcInfo=u.nfcId?'<div class="muted">תג'+(tagTypeName?' '+tagTypeName:'')+': '+u.nfcId+'</div>':'';
+    const accNames={allow_qr:'QR',allow_code:'קוד',allow_nfc:'תג',allow_remote:'פתיחה מרחוק'};
+    let accList=u.access?Object.keys(accNames).filter(k=>u.access[k]).map(k=>accNames[k]):[];
+    let accInfo='<div class="muted">אמצעי כניסה: '+(accList.length?accList.join(', '):'ללא')+'</div>';
     let btns='<a class="link" href="/q/'+u.id+'" target="_blank">QR ↗</a>';
     btns+='<button class="wa sm" onclick="shareWa(\\''+u.id+'\\')">וואטסאפ</button>';
     if(can('issue_code'))btns+='<button class="ghost sm" onclick="issueCode(\\''+u.id+'\\')">הנפק קוד</button>';
     if(can('use_nfc'))btns+='<button class="ghost sm" onclick="setNfc(\\''+u.id+'\\')">NFC</button>';
     if(can('time_windows'))btns+='<button class="ghost sm" onclick="setWindow(\\''+u.id+'\\')">חלון זמן</button>';
+    if(Object.keys(ME.grantable||{}).length)btns+='<button class="ghost sm" onclick="editAccess(\\''+u.id+'\\')">🔑 הרשאות כניסה</button>';
     if(can('manage_users')){btns+='<button class="ghost sm" onclick="rename(\\''+u.id+'\\',\\''+u.name.replace(/\\x27/g,"")+'\\')">שם</button>';
       btns+='<button class="ghost sm" onclick="resetAccess(\\''+u.id+'\\',\\''+u.name.replace(/\\x27/g,"")+'\\')">🔄 איפוס גישה</button>';
       btns+='<button class="'+(u.active?'danger':'ghost')+' sm" onclick="toggle(\\''+u.id+'\\','+(!u.active)+')">'+(u.active?'השבת':'הפעל')+'</button>';
       btns+='<button class="danger sm" onclick="del(\\''+u.id+'\\',\\''+u.name.replace(/\\x27/g,"")+'\\')">מחק</button>';}
-    div.innerHTML='<div class="top"><span class="name">'+u.name+'</span><span class="pill '+(u.active?'on':'off')+'">'+(u.active?'פעיל':'מושבת')+'</span></div>'+codeInfo+nfcInfo+'<div class="btns">'+btns+'</div>';
+    div.innerHTML='<div class="top"><span class="name">'+u.name+'</span><span class="pill '+(u.active?'on':'off')+'">'+(u.active?'פעיל':'מושבת')+'</span></div>'+accInfo+codeInfo+nfcInfo+'<div class="btns">'+btns+'</div>';
     box.appendChild(div);
   });
 }
@@ -637,6 +689,23 @@ function startTagListen(){
 function stopTagListen(){if(tagPollTimer){clearInterval(tagPollTimer);tagPollTimer=null;}}
 async function saveNfc(id){const nfcId=document.getElementById('nfcManual').value.trim();if(!nfcId){alert('אין UID');return;}const nfcType=document.getElementById('nfcType').value;stopTagListen();await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nfcId,nfcType})});closeModal();loadUsers();}
 async function clearNfc(id){stopTagListen();await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nfcId:''})});closeModal();loadUsers();}
+function editAccess(id){
+  const u=USERS.find(x=>x.id===id); if(!u)return;
+  const acc=u.access||{};
+  let html='<h3>הרשאות כניסה — '+u.name+'</h3><p class="muted">סמן אילו אמצעי כניסה מותרים למשתמש זה. מוצגים רק אמצעים שאתה מורשה להקצות.</p><div id="accBox">';
+  Object.entries(ME.grantable).forEach(([k,label])=>{
+    html+='<label class="perm"><input type="checkbox" value="'+k+'" '+(acc[k]?'checked':'')+'> '+label+'</label>';
+  });
+  html+='</div><div class="btns" style="margin-top:14px"><button class="primary sm" style="flex:1" onclick="saveAccess(\\''+id+'\\')">שמור</button><button class="ghost sm" onclick="closeModal()">ביטול</button></div>';
+  openModal(html);
+}
+async function saveAccess(id){
+  const access={};
+  Object.keys(ME.grantable).forEach(k=>{access[k]=false;});
+  [...document.querySelectorAll('#accBox input:checked')].forEach(c=>{access[c.value]=true;});
+  await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({access})});
+  closeModal();loadUsers();
+}
 async function setWindow(id){const ans=prompt('חלון זמן. "תמיד" לגישה חופשית.\\nדוגמה: 0,1,2,3,4 08:00 18:00','תמיד');if(ans===null)return;let win=null;if(ans.trim()!=='תמיד'){const pr=ans.trim().split(/\\s+/);win={days:(pr[0]||'').split(',').map(x=>parseInt(x)).filter(x=>!isNaN(x)),from:pr[1]||'00:00',to:pr[2]||'23:59'};}await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({window:win})});loadUsers();}
 async function issueCode(id){
   let types=[]; if(can('code_permanent'))types.push(['permanent','קבוע']); if(can('code_temporary'))types.push(['temporary','זמני 24ש']); if(can('code_onetime'))types.push(['onetime','חד-פעמי']);
