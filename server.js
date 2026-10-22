@@ -23,7 +23,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = '8.0';
+const VERSION = '9.0';
 // סוגי תגי NFC/RFID נתמכים
 const TAG_TYPES = { '125khz': 'תג 125kHz (EM/קירבה)', '13.56mhz': 'תג 13.56MHz (Mifare/NFC)' };
 
@@ -578,11 +578,15 @@ function setNfc(id){
   let html='<h3>שיוך תג/כרטיס NFC — '+(u?u.name:'')+'</h3>';
   html+='<p class="muted">שתי דרכים לקלוט את מספר התג (UID):</p>';
   html+='<div style="border:1px solid #e2e8f0;border-radius:12px;padding:12px;margin-bottom:12px">';
-  html+='<b>1. קליטה מהקורא (אוטומטי)</b><div class="muted" style="margin:4px 0 8px">הצמד את התג לקורא בדלת, והמספר יופיע כאן.</div>';
+  html+='<b>1. קריאה מהנייד (הצמדה)</b><div class="muted" style="margin:4px 0 8px">הצמד תג 13.56MHz לגב הנייד (אנדרואיד + Chrome).</div>';
+  html+='<button class="primary sm" style="width:100%" onclick="readTagFromPhone()">📱 קרא תג מהנייד</button>';
+  html+='<div id="phoneStatus" class="muted" style="margin-top:8px"></div></div>';
+  html+='<div style="border:1px solid #e2e8f0;border-radius:12px;padding:12px;margin-bottom:12px">';
+  html+='<b>2. קליטה מהקורא (אוטומטי)</b><div class="muted" style="margin:4px 0 8px">הצמד את התג לקורא בדלת, והמספר יופיע כאן.</div>';
   html+='<button class="ghost sm" style="width:100%" onclick="startTagListen()">🔄 התחל להאזין לקורא</button>';
   html+='<div id="tagStatus" class="muted" style="margin-top:8px"></div></div>';
   html+='<div style="border:1px solid #e2e8f0;border-radius:12px;padding:12px;margin-bottom:12px">';
-  html+='<b>2. הזנה ידנית / מהנייד</b><div class="muted" style="margin:4px 0 8px">קרא עם אפליקציית NFC בנייד והקלד כאן:</div>';
+  html+='<b>3. הזנה ידנית</b><div class="muted" style="margin:4px 0 8px">אם ידוע לך ה-UID — הקלד כאן:</div>';
   html+='<input id="nfcManual" placeholder="UID (למשל 04A3B2C1)" value="'+(u&&u.nfcId?u.nfcId:'')+'"></div>';
   const curType=(u&&u.nfcType)?u.nfcType:'13.56mhz';
   html+='<label>סוג התג</label><select id="nfcType" style="margin-bottom:12px">';
@@ -592,6 +596,31 @@ function setNfc(id){
   if(u&&u.nfcId)html+='<button class="danger sm" onclick="clearNfc(\\''+id+'\\')">הסר תג</button>';
   html+='<button class="ghost sm" onclick="stopTagListen();closeModal()">סגור</button></div>';
   openModal(html);
+}
+async function readTagFromPhone(){
+  const st=document.getElementById('phoneStatus');
+  if(!('NDEFReader' in window)){
+    st.innerHTML='<span style="color:#b7791f">⚠️ הדפדפן/מכשיר לא תומך בקריאת NFC (נתמך באנדרואיד + Chrome בלבד, ורק תגי 13.56MHz). השתמש בהזנה ידנית למטה או בקורא בדלת.</span>';
+    return;
+  }
+  try{
+    st.textContent='⏳ מצמיד תג לגב הנייד...';
+    const reader=new NDEFReader();
+    await reader.scan();
+    reader.onreading=(event)=>{
+      const uid=(event.serialNumber||'').toUpperCase().replace(/:/g,'');
+      if(uid){
+        document.getElementById('nfcManual').value=uid;
+        document.getElementById('nfcType').value='13.56mhz';
+        st.innerHTML='✓ נקרא תג: <b>'+uid+'</b> — לחץ "שמור תג".';
+      } else {
+        st.innerHTML='<span style="color:#b7791f">התג נקרא אך ללא מזהה. נסה שוב או הזן ידנית.</span>';
+      }
+    };
+    reader.onreadingerror=()=>{ st.innerHTML='<span style="color:#c0392b">שגיאת קריאה. נסה שוב.</span>'; };
+  }catch(e){
+    st.innerHTML='<span style="color:#c0392b">לא ניתן לקרוא: '+(e.message||'שגיאה')+'. ודא ש-NFC מופעל בנייד, או הזן ידנית.</span>';
+  }
 }
 function startTagListen(){
   const st=document.getElementById('tagStatus'); st.textContent='⏳ ממתין לתג... הצמד עכשיו לקורא.';
@@ -656,4 +685,4 @@ async function tick(){try{const r=await (await fetch('/api/qr/${user.id}')).json
   qr.clear();qr.makeCode(r.payload);document.getElementById('sec').textContent=r.secondsLeft;document.getElementById('bar').style.width=(r.secondsLeft/${STEP_SECONDS}*100)+'%';}catch(e){}}
 tick();setInterval(tick,1000);
 </script>`);
-        }
+  }
