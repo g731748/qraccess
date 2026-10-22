@@ -23,7 +23,9 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = '7.0';
+const VERSION = '8.0';
+// סוגי תגי NFC/RFID נתמכים
+const TAG_TYPES = { '125khz': 'תג 125kHz (EM/קירבה)', '13.56mhz': 'תג 13.56MHz (Mifare/NFC)' };
 
 // זיכרון קצר של התג האחרון שנסרק ולא זוהה — לקליטה אוטומטית מהקורא
 // לכל לקוח (tenant) נשמר התג האחרון, לתקופה קצרה
@@ -157,18 +159,20 @@ const server = http.createServer(async (req, res) => {
       if (user) { if (!user.active) reason = 'מושבת'; else if (user.codeType === 'temporary' && user.codeExp && Date.now() > user.codeExp) reason = 'קוד פג'; else if (!withinWindow(user)) reason = 'מחוץ לחלון זמן'; else { result = 'granted'; reason = ''; if (user.codeType === 'onetime') { user.code = null; user.codeType = null; } } }
     } else if (raw.startsWith('NFC:')) {
       method = 'nfc'; const nfc = raw.slice(4); user = Object.values(db.users).find(x => x.nfcId && x.nfcId === nfc);
+      // סוג התג שהקורא מדווח (125khz / 13.56mhz) — אם נשלח
+      var tagType = (b.tagType && TAG_TYPES[b.tagType]) ? b.tagType : null;
       if (user) { if (!user.active) reason = 'מושבת'; else if (!withinWindow(user)) reason = 'מחוץ לחלון זמן'; else { result = 'granted'; reason = ''; } }
       else {
-        // תג לא מוכר — נשמור אותו לקליטה אוטומטית. הקורא שולח tenantId/doorId
+        // תג לא מוכר — נשמור אותו לקליטה אוטומטית. הקורא שולח tenantId/doorId + סוג
         let tid = b.tenantId || null;
         if (!tid && b.doorId && db.doors[b.doorId]) tid = db.doors[b.doorId].tenantId;
-        if (tid) { lastUnknownTag[tid] = { uid: nfc, ts: Date.now() }; reason = 'תג לא רשום (זמין לשיוך)'; }
+        if (tid) { lastUnknownTag[tid] = { uid: nfc, type: tagType, ts: Date.now() }; reason = 'תג לא רשום (זמין לשיוך)'; }
       }
     } else {
       method = 'qr'; const [uid, code] = raw.split('.'); user = db.users[uid];
       if (user) { if (!user.active) reason = 'מושבת'; else if (!withinWindow(user)) reason = 'מחוץ לחלון זמן'; else if (!code || !verifyTotp(user.secret, code)) reason = 'קוד לא תקף'; else { result = 'granted'; reason = ''; } }
     }
-    db.log.unshift({ ts: Date.now(), tenantId: user ? user.tenantId : null, userId: user ? user.id : null, userName: user ? user.name : 'לא ידוע', method, result, reason, doorId: b.doorId || null });
+    db.log.unshift({ ts: Date.now(), tenantId: user ? user.tenantId : null, userId: user ? user.id : null, userName: user ? user.name : 'לא ידוע', method, result, reason, tagType: (method === 'nfc' ? (user && user.nfcType ? user.nfcType : (typeof tagType !== 'undefined' ? tagType : null)) : null), doorId: b.doorId || null });
     db.log = db.log.slice(0, 2000); saveDB();
     return send(res, 200, { result, open: result === 'granted', reason, method });
   }
@@ -234,7 +238,7 @@ const server = http.createServer(async (req, res) => {
     // קליטת תג אוטומטית: מחזיר את התג האחרון שנסרק בקורא ולא זוהה (לשיוך)
     if (p === '/api/last-tag' && m === 'GET') {
       const t = lastUnknownTag[tid];
-      if (t && Date.now() - t.ts < TAG_ENROLL_WINDOW) return send(res, 200, { uid: t.uid, ageSec: Math.floor((Date.now() - t.ts) / 1000) });
+      if (t && Date.now() - t.ts < TAG_ENROLL_WINDOW) return send(res, 200, { uid: t.uid, type: t.type || null, ageSec: Math.floor((Date.now() - t.ts) / 1000) });
       return send(res, 200, { uid: null });
     }
     // מנהל משנה את הסיסמה של עצמו
@@ -251,7 +255,7 @@ const server = http.createServer(async (req, res) => {
       const count = Object.values(db.users).filter(x => x.tenantId === tid).length;
       if (count >= a.maxUsers) return send(res, 403, { error: `הגעת למכסה (${a.maxUsers})` });
       const b = await readBody(req); const id = 'u' + crypto.randomBytes(3).toString('hex');
-      db.users[id] = { id, tenantId: tid, name: b.name || 'משתמש', phone: b.phone || '', secret: newSecret(), code: null, codeType: null, codeExp: null, nfcId: null, active: true, window: null, createdAt: Date.now() };
+      db.users[id] = { id, tenantId: tid, name: b.name || 'משתמש', phone: b.phone || '', secret: newSecret(), code: null, codeType: null, codeExp: null, nfcId: null, nfcType: null, active: true, window: null, createdAt: Date.now() };
       saveDB(); return send(res, 200, db.users[id]);
     }
     if (p.startsWith('/api/users/') && p.endsWith('/code') && m === 'POST') {
@@ -270,7 +274,7 @@ const server = http.createServer(async (req, res) => {
       if (typeof b.active === 'boolean') user.active = b.active;
       if (typeof b.name === 'string' && b.name.trim()) user.name = b.name.trim();
       if ('window' in b && has('time_windows')) user.window = b.window;
-      if ('nfcId' in b && has('use_nfc')) user.nfcId = b.nfcId || null;
+      if ('nfcId' in b && has('use_nfc')) { user.nfcId = b.nfcId || null; if ('nfcType' in b) user.nfcType = b.nfcType || null; if (!user.nfcId) user.nfcType = null; }
       if (typeof b.phone === 'string') user.phone = b.phone.trim();
       if (b.resetAccess) { user.secret = newSecret(); user.code = null; user.codeType = null; } // איפוס: QR חדש, מבטל קוד ישן
       saveDB(); return send(res, 200, user);
@@ -450,7 +454,7 @@ async function load(){
 }
 function renderLog(log,elId){
   const lb=document.getElementById(elId); lb.innerHTML=log.length?'':'<div class="muted">אין כניסות.</div>';
-  log.forEach(l=>{const d=document.createElement('div');d.className='logline';const t=new Date(l.ts).toLocaleString('he-IL');const mth={qr:'QR',code:'קוד',nfc:'NFC'}[l.method]||l.method;
+  log.forEach(l=>{const d=document.createElement('div');d.className='logline';const t=new Date(l.ts).toLocaleString('he-IL');const mth=({qr:'QR',code:'קוד',nfc:'NFC'}[l.method]||l.method)+(l.method==='nfc'&&l.tagType?' '+({'125khz':'125kHz','13.56mhz':'13.56MHz'}[l.tagType]||''):'');
     d.innerHTML='<span>'+l.userName+' <span class="muted">('+mth+')</span></span><span class="'+(l.result==='granted'?'g':'r')+'">'+(l.result==='granted'?'✓':'✕'+(l.reason?' '+l.reason:''))+'</span><span class="muted">'+t+'</span>';lb.appendChild(d);});
 }
 function editAdmin(json){
@@ -543,7 +547,8 @@ function render(){
   list.forEach(u=>{
     const div=document.createElement('div'); div.className='item';
     let codeInfo=''; if(u.code){const ct={permanent:'קבוע',temporary:'זמני',onetime:'חד-פעמי'}[u.codeType]||'';codeInfo='<div class="muted">קוד '+ct+': <b style="font-size:16px;color:#1f3a5f">'+u.code+'</b></div>';}
-    let nfcInfo=u.nfcId?'<div class="muted">NFC: '+u.nfcId+'</div>':'';
+    let tagTypeName={'125khz':'125kHz','13.56mhz':'13.56MHz'}[u.nfcType]||'';
+    let nfcInfo=u.nfcId?'<div class="muted">תג'+(tagTypeName?' '+tagTypeName:'')+': '+u.nfcId+'</div>':'';
     let btns='<a class="link" href="/q/'+u.id+'" target="_blank">QR ↗</a>';
     btns+='<button class="wa sm" onclick="shareWa(\\''+u.id+'\\')">וואטסאפ</button>';
     if(can('issue_code'))btns+='<button class="ghost sm" onclick="issueCode(\\''+u.id+'\\')">הנפק קוד</button>';
@@ -558,7 +563,7 @@ function render(){
   });
 }
 async function loadLog(){const log=await (await fetch('/api/log')).json();const lb=document.getElementById('log');lb.innerHTML=log.length?'':'<div class="muted">אין כניסות.</div>';
-  log.forEach(l=>{const d=document.createElement('div');d.className='logline';const t=new Date(l.ts).toLocaleString('he-IL');const mth={qr:'QR',code:'קוד',nfc:'NFC'}[l.method]||l.method;
+  log.forEach(l=>{const d=document.createElement('div');d.className='logline';const t=new Date(l.ts).toLocaleString('he-IL');const mth=({qr:'QR',code:'קוד',nfc:'NFC'}[l.method]||l.method)+(l.method==='nfc'&&l.tagType?' '+({'125khz':'125kHz','13.56mhz':'13.56MHz'}[l.tagType]||''):'');
     d.innerHTML='<span>'+l.userName+' <span class="muted">('+mth+')</span></span><span class="'+(l.result==='granted'?'g':'r')+'">'+(l.result==='granted'?'✓':'✕'+(l.reason?' '+l.reason:''))+'</span><span class="muted">'+t+'</span>';lb.appendChild(d);});}
 async function addUser(){const name=document.getElementById('name').value.trim()||'משתמש';
   const r=await fetch('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
@@ -579,6 +584,10 @@ function setNfc(id){
   html+='<div style="border:1px solid #e2e8f0;border-radius:12px;padding:12px;margin-bottom:12px">';
   html+='<b>2. הזנה ידנית / מהנייד</b><div class="muted" style="margin:4px 0 8px">קרא עם אפליקציית NFC בנייד והקלד כאן:</div>';
   html+='<input id="nfcManual" placeholder="UID (למשל 04A3B2C1)" value="'+(u&&u.nfcId?u.nfcId:'')+'"></div>';
+  const curType=(u&&u.nfcType)?u.nfcType:'13.56mhz';
+  html+='<label>סוג התג</label><select id="nfcType" style="margin-bottom:12px">';
+  html+='<option value="13.56mhz"'+(curType==='13.56mhz'?' selected':'')+'>תג 13.56MHz (Mifare/NFC)</option>';
+  html+='<option value="125khz"'+(curType==='125khz'?' selected':'')+'>תג 125kHz (EM/קירבה)</option></select>';
   html+='<div class="btns"><button class="primary sm" style="flex:1" onclick="saveNfc(\\''+id+'\\')">שמור תג</button>';
   if(u&&u.nfcId)html+='<button class="danger sm" onclick="clearNfc(\\''+id+'\\')">הסר תג</button>';
   html+='<button class="ghost sm" onclick="stopTagListen();closeModal()">סגור</button></div>';
@@ -589,12 +598,15 @@ function startTagListen(){
   if(tagPollTimer)clearInterval(tagPollTimer);
   tagPollTimer=setInterval(async()=>{
     try{const r=await (await fetch('/api/last-tag')).json();
-      if(r.uid){document.getElementById('nfcManual').value=r.uid;st.innerHTML='✓ זוהה תג: <b>'+r.uid+'</b> — לחץ "שמור תג".';stopTagListen();}
+      if(r.uid){document.getElementById('nfcManual').value=r.uid;
+        if(r.type){document.getElementById('nfcType').value=r.type;}
+        const tn={'125khz':'125kHz','13.56mhz':'13.56MHz'}[r.type]||'';
+        st.innerHTML='✓ זוהה תג'+(tn?' ('+tn+')':'')+': <b>'+r.uid+'</b> — לחץ "שמור תג".';stopTagListen();}
     }catch(e){}
   },1500);
 }
 function stopTagListen(){if(tagPollTimer){clearInterval(tagPollTimer);tagPollTimer=null;}}
-async function saveNfc(id){const nfcId=document.getElementById('nfcManual').value.trim();if(!nfcId){alert('אין UID');return;}stopTagListen();await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nfcId})});closeModal();loadUsers();}
+async function saveNfc(id){const nfcId=document.getElementById('nfcManual').value.trim();if(!nfcId){alert('אין UID');return;}const nfcType=document.getElementById('nfcType').value;stopTagListen();await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nfcId,nfcType})});closeModal();loadUsers();}
 async function clearNfc(id){stopTagListen();await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nfcId:''})});closeModal();loadUsers();}
 async function setWindow(id){const ans=prompt('חלון זמן. "תמיד" לגישה חופשית.\\nדוגמה: 0,1,2,3,4 08:00 18:00','תמיד');if(ans===null)return;let win=null;if(ans.trim()!=='תמיד'){const pr=ans.trim().split(/\\s+/);win={days:(pr[0]||'').split(',').map(x=>parseInt(x)).filter(x=>!isNaN(x)),from:pr[1]||'00:00',to:pr[2]||'23:59'};}await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({window:win})});loadUsers();}
 async function issueCode(id){
@@ -644,4 +656,4 @@ async function tick(){try{const r=await (await fetch('/api/qr/${user.id}')).json
   qr.clear();qr.makeCode(r.payload);document.getElementById('sec').textContent=r.secondsLeft;document.getElementById('bar').style.width=(r.secondsLeft/${STEP_SECONDS}*100)+'%';}catch(e){}}
 tick();setInterval(tick,1000);
 </script>`);
-}
+        }
