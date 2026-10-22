@@ -23,7 +23,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = '4.0';
+const VERSION = '5.0';
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'data', 'db.json');
 const STEP_SECONDS = 30, TOLERANCE = 1;
@@ -150,8 +150,15 @@ const server = http.createServer(async (req, res) => {
       db.tenants[tid] = { id: tid, name: b.name || 'לקוח חדש', createdAt: Date.now() };
       const aid = 'a' + crypto.randomBytes(3).toString('hex'); const { salt, passHash } = makePass(b.adminPassword || 'changeme');
       const perms = {}; (b.perms || ['manage_users', 'issue_qr', 'view_log']).forEach(k => { if (PERMS[k]) perms[k] = true; });
-      db.admins[aid] = { id: aid, tenantId: tid, user: b.adminUser || ('admin_' + tid), name: b.adminName || 'מנהל', salt, passHash, perms, maxUsers: b.maxUsers || 50, active: true };
+      db.admins[aid] = { id: aid, tenantId: tid, user: b.adminUser || ('admin_' + tid), name: b.adminName || 'מנהל', phone: b.phone || '', email: b.email || '', salt, passHash, perms, maxUsers: b.maxUsers || 50, active: true };
       saveDB(); return send(res, 200, { tenant: db.tenants[tid], adminUser: db.admins[aid].user });
+    }
+    // איפוס סיסמה מהיר למנהל — מחזיר סיסמה זמנית (לפני המטפל הכללי!)
+    if (p.startsWith('/api/admins/') && p.endsWith('/reset') && m === 'POST') {
+      const id = p.split('/')[3]; const a = db.admins[id]; if (!a) return send(res, 404, { error: 'not found' });
+      const temp = 'tmp' + Math.floor(1000 + Math.random() * 9000);
+      const x = makePass(temp); a.salt = x.salt; a.passHash = x.passHash; saveDB();
+      return send(res, 200, { ok: true, tempPassword: temp, user: a.user, phone: a.phone || '' });
     }
     if (p.startsWith('/api/admins/') && m === 'POST') {
       const id = p.split('/')[3]; const b = await readBody(req); const a = db.admins[id]; if (!a) return send(res, 404, { error: 'not found' });
@@ -160,7 +167,13 @@ const server = http.createServer(async (req, res) => {
       if (typeof b.maxUsers === 'number' && b.maxUsers > 0) a.maxUsers = b.maxUsers;
       if (b.newPassword) { const x = makePass(b.newPassword); a.salt = x.salt; a.passHash = x.passHash; }
       if (typeof b.name === 'string' && b.name.trim()) a.name = b.name.trim();
+      if (typeof b.phone === 'string') a.phone = b.phone.trim();
+      if (typeof b.email === 'string') a.email = b.email.trim();
       saveDB(); return send(res, 200, { ok: true });
+    }
+    // שינוי סיסמת על-מנהל עצמו — דורש הגדרה ב-Render (לא ניתן לשנות ENV מהקוד)
+    if (p === '/api/self/password' && m === 'POST') {
+      return send(res, 200, { ok: false, note: 'super' });
     }
     if (p.startsWith('/api/tenants/') && m === 'DELETE') {
       const id = p.split('/')[3]; delete db.tenants[id];
@@ -176,13 +189,21 @@ const server = http.createServer(async (req, res) => {
   if (S.role === 'admin') {
     const a = db.admins[S.adminId]; if (!a || !a.active) return send(res, 200, loginPage(), 'text/html');
     const has = k => !!a.perms[k]; const tid = S.tenantId;
+    // מנהל משנה את הסיסמה של עצמו
+    if (p === '/api/self/password' && m === 'POST') {
+      const b = await readBody(req);
+      if (!b.current || !checkPass(b.current, a.salt, a.passHash)) return send(res, 403, { ok: false, error: 'סיסמה נוכחית שגויה' });
+      if (!b.newPassword || b.newPassword.length < 4) return send(res, 400, { ok: false, error: 'סיסמה חדשה קצרה מדי' });
+      const x = makePass(b.newPassword); a.salt = x.salt; a.passHash = x.passHash; saveDB();
+      return send(res, 200, { ok: true });
+    }
     if (p === '/api/users' && m === 'GET') return send(res, 200, Object.values(db.users).filter(x => x.tenantId === tid));
     if (p === '/api/users' && m === 'POST') {
       if (!has('manage_users')) return send(res, 403, { error: 'אין הרשאה' });
       const count = Object.values(db.users).filter(x => x.tenantId === tid).length;
       if (count >= a.maxUsers) return send(res, 403, { error: `הגעת למכסה (${a.maxUsers})` });
       const b = await readBody(req); const id = 'u' + crypto.randomBytes(3).toString('hex');
-      db.users[id] = { id, tenantId: tid, name: b.name || 'משתמש', secret: newSecret(), code: null, codeType: null, codeExp: null, nfcId: null, active: true, window: null, createdAt: Date.now() };
+      db.users[id] = { id, tenantId: tid, name: b.name || 'משתמש', phone: b.phone || '', secret: newSecret(), code: null, codeType: null, codeExp: null, nfcId: null, active: true, window: null, createdAt: Date.now() };
       saveDB(); return send(res, 200, db.users[id]);
     }
     if (p.startsWith('/api/users/') && p.endsWith('/code') && m === 'POST') {
@@ -202,6 +223,8 @@ const server = http.createServer(async (req, res) => {
       if (typeof b.name === 'string' && b.name.trim()) user.name = b.name.trim();
       if ('window' in b && has('time_windows')) user.window = b.window;
       if ('nfcId' in b && has('use_nfc')) user.nfcId = b.nfcId || null;
+      if (typeof b.phone === 'string') user.phone = b.phone.trim();
+      if (b.resetAccess) { user.secret = newSecret(); user.code = null; user.codeType = null; } // איפוס: QR חדש, מבטל קוד ישן
       saveDB(); return send(res, 200, user);
     }
     if (p.startsWith('/api/users/') && m === 'DELETE') {
@@ -296,7 +319,7 @@ document.getElementById('pass').addEventListener('keydown',e=>{if(e.key==='Enter
 
 function superPage() {
   return shell('ניהול-על', `
-<div class="nav"><span class="badge">👑 ניהול-על</span><a href="#" onclick="logout();return false;">התנתק</a><span class="ver">גרסה <span id="ver">…</span></span></div>
+<div class="nav"><span class="badge">👑 ניהול-על</span><a href="#" onclick="myPassword();return false;">🔑 הסיסמה שלי</a><a href="#" onclick="logout();return false;">התנתק</a><span class="ver">גרסה <span id="ver">…</span></span></div>
 <h1>לוח בקרה</h1><p class="sub">סקירה של כל הלקוחות והכניסות היום.</p>
 <div class="stats" id="stats"></div>
 
@@ -306,6 +329,7 @@ function superPage() {
     <input id="tname" placeholder="שם הלקוח/אתר (למשל: בניין רוטשילד 5)">
     <div class="row wrap2"><input id="auser" placeholder="שם משתמש למנהל" style="flex:1"><input id="aname" placeholder="שם המנהל" style="flex:1"></div>
     <input id="apass" placeholder="סיסמה למנהל">
+    <div class="row wrap2"><input id="aphone" placeholder="נייד המנהל (לשחזור)" style="flex:1"><input id="aemail" placeholder="מייל (לא חובה)" style="flex:1"></div>
     <label>מכסת משתמשים: <input id="amax" type="number" value="50" style="width:100px;display:inline-block"></label>
     <div><label>הרשאות למנהל:</label><div id="permbox" style="margin-top:6px"></div></div>
     <button class="primary" onclick="addTenant()">צור לקוח + מנהל</button>
@@ -319,6 +343,17 @@ function superPage() {
 <script>
 const PERMS=${JSON.stringify(PERMS)};
 async function logout(){await fetch('/api/logout');location.href='/admin';}
+function myPassword(){
+  openModal('<h3>🔑 הסיסמה שלך (על-מנהל)</h3>'+
+    '<p class="muted">מטעמי אבטחה, סיסמת העל-מנהל נשמרת מחוץ לקוד ומשתנה דרך Render (לא מהממשק):</p>'+
+    '<ol style="font-size:14px;line-height:1.8;padding-right:18px">'+
+    '<li>היכנס ל-Render → השירות qraccess</li>'+
+    '<li>פתח <b>Environment</b></li>'+
+    '<li>ערוך את <b>SUPER_PASSWORD</b> (והוסף אם חסר)</li>'+
+    '<li>שמור — השרת יתעדכן תוך דקה</li></ol>'+
+    '<p class="muted">כך אף אחד שנכנס למערכת לא יכול לשנות את סיסמת-העל שלך — רק מי שיש לו גישה ל-Render (אתה).</p>'+
+    '<button class="ghost sm" onclick="closeModal()">הבנתי</button>');
+}
 function permCheckboxes(containerId, selected){
   const box=document.getElementById(containerId); box.innerHTML='';
   Object.entries(PERMS).forEach(([k,label])=>{
@@ -338,10 +373,10 @@ async function init(){
   permCheckboxes('permbox',['manage_users','issue_qr','view_log']); load();
 }
 async function addTenant(){
-  const body={name:tname.value.trim(),adminUser:auser.value.trim(),adminName:aname.value.trim(),adminPassword:apass.value,maxUsers:parseInt(amax.value)||50,perms:checkedIn('permbox')};
+  const body={name:tname.value.trim(),adminUser:auser.value.trim(),adminName:aname.value.trim(),adminPassword:apass.value,phone:document.getElementById('aphone').value.trim(),email:document.getElementById('aemail').value.trim(),maxUsers:parseInt(amax.value)||50,perms:checkedIn('permbox')};
   if(!body.name||!body.adminUser||!body.adminPassword){msg.textContent='מלא שם לקוח, שם משתמש וסיסמה';return;}
   const r=await (await fetch('/api/tenants',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
-  msg.textContent='✓ נוצר! מנהל: '+r.adminUser; tname.value=auser.value=aname.value=apass.value=''; init();
+  msg.textContent='✓ נוצר! מנהל: '+r.adminUser; tname.value=auser.value=aname.value=apass.value=document.getElementById('aphone').value=document.getElementById('aemail').value=''; init();
 }
 const tname=document.getElementById('tname'),auser=document.getElementById('auser'),aname=document.getElementById('aname'),apass=document.getElementById('apass'),amax=document.getElementById('amax'),msg=document.getElementById('msg');
 async function load(){
@@ -371,18 +406,30 @@ function editAdmin(json){
   const a=JSON.parse(json);
   let html='<h3>עריכת מנהל: '+a.name+'</h3>';
   html+='<label>שם המנהל</label><input id="eName" value="'+a.name+'" style="margin-bottom:10px">';
+  html+='<label>נייד (לשחזור)</label><input id="ePhone" value="'+(a.phone||'')+'" placeholder="05X-XXXXXXX" style="margin-bottom:10px">';
   html+='<label>מכסת משתמשים</label><input id="eMax" type="number" value="'+a.maxUsers+'" style="margin-bottom:10px">';
   html+='<label>סיסמה חדשה (ריק = ללא שינוי)</label><input id="ePass" placeholder="סיסמה חדשה" style="margin-bottom:10px">';
+  html+='<button class="ghost sm" style="width:100%;margin-bottom:12px" onclick="resetAdmin(\\''+a.id+'\\')">🔄 איפוס מהיר — צור סיסמה זמנית</button>';
   html+='<label>הרשאות</label><div id="ePerms"></div>';
   html+='<div class="btns" style="margin-top:14px"><button class="primary sm" style="flex:1" onclick="saveAdmin(\\''+a.id+'\\')">שמור</button><button class="ghost sm" onclick="closeModal()">ביטול</button></div>';
   openModal(html);
   permCheckboxes('ePerms',a.perms);
 }
 async function saveAdmin(id){
-  const body={name:document.getElementById('eName').value.trim(),maxUsers:parseInt(document.getElementById('eMax').value)||50,perms:checkedIn('ePerms')};
+  const body={name:document.getElementById('eName').value.trim(),phone:document.getElementById('ePhone').value.trim(),maxUsers:parseInt(document.getElementById('eMax').value)||50,perms:checkedIn('ePerms')};
   const np=document.getElementById('ePass').value; if(np)body.newPassword=np;
   await fetch('/api/admins/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   closeModal(); load();
+}
+async function resetAdmin(id){
+  if(!confirm('לאפס סיסמה? תיווצר סיסמה זמנית שתוכל לשלוח למנהל.'))return;
+  const r=await (await fetch('/api/admins/'+id+'/reset',{method:'POST'})).json();
+  if(r.ok){const msg='הסיסמה החדשה שלך למערכת: '+r.tempPassword+' (מומלץ להחליף אחרי הכניסה)';
+    let h='<h3>סיסמה זמנית נוצרה ✓</h3><p class="muted">משתמש: '+r.user+'</p><div style="font-size:28px;font-weight:bold;text-align:center;color:#1f3a5f;background:#eef3f8;border-radius:12px;padding:16px;margin:10px 0">'+r.tempPassword+'</div>';
+    h+='<a href="'+waLink(msg)+'" target="_blank"><button class="wa" style="margin-bottom:8px">שלח בוואטסאפ</button></a>';
+    h+='<button class="ghost sm" onclick="closeModal();load()">סגור</button>';
+    openModal(h);
+  } else alert(r.error||'שגיאה');
 }
 async function toggleAdmin(id,active){await fetch('/api/admins/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active})});load();}
 async function delTenant(id,name){if(confirm('למחוק את '+name+' וכל המשתמשים שלו?')){await fetch('/api/tenants/'+id,{method:'DELETE'});init();}}
@@ -392,7 +439,7 @@ init();
 
 function adminPage() {
   return shell('ניהול אתר', `
-<div class="nav"><span class="badge">🏢 <span id="tname">…</span></span><a href="#" onclick="logout();return false;">התנתק</a><span class="ver">גרסה <span id="ver">…</span></span></div>
+<div class="nav"><span class="badge">🏢 <span id="tname">…</span></span><a href="#" onclick="changeMyPass();return false;">🔑 שנה סיסמה</a><a href="#" onclick="logout();return false;">התנתק</a><span class="ver">גרסה <span id="ver">…</span></span></div>
 <h1 id="title">ניהול כניסה</h1><p class="sub" id="whoami"></p>
 <div class="stats" id="stats"></div>
 
@@ -412,6 +459,18 @@ function adminPage() {
 let ME={perms:[]}, USERS=[];
 async function logout(){await fetch('/api/logout');location.href='/admin';}
 function can(k){return ME.perms.includes(k);}
+function changeMyPass(){
+  openModal('<h3>🔑 שינוי הסיסמה שלי</h3>'+
+    '<label>סיסמה נוכחית</label><input id="cpCur" type="password" style="margin-bottom:10px">'+
+    '<label>סיסמה חדשה</label><input id="cpNew" type="password" style="margin-bottom:10px">'+
+    '<div id="cpErr" class="r" style="font-size:13px;margin-bottom:8px"></div>'+
+    '<div class="btns"><button class="primary sm" style="flex:1" onclick="doChangePass()">שמור</button><button class="ghost sm" onclick="closeModal()">ביטול</button></div>');
+}
+async function doChangePass(){
+  const current=document.getElementById('cpCur').value,newPassword=document.getElementById('cpNew').value;
+  const r=await (await fetch('/api/self/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current,newPassword})})).json();
+  if(r.ok){closeModal();alert('הסיסמה שונתה ✓');}else document.getElementById('cpErr').textContent=r.error||'שגיאה';
+}
 async function init(){
   ME=await (await fetch('/api/me')).json();
   document.getElementById('ver').textContent=ME.version; document.getElementById('tname').textContent=ME.tenantName||'אתר';
@@ -440,6 +499,7 @@ function render(){
     if(can('use_nfc'))btns+='<button class="ghost sm" onclick="setNfc(\\''+u.id+'\\')">NFC</button>';
     if(can('time_windows'))btns+='<button class="ghost sm" onclick="setWindow(\\''+u.id+'\\')">חלון זמן</button>';
     if(can('manage_users')){btns+='<button class="ghost sm" onclick="rename(\\''+u.id+'\\',\\''+u.name.replace(/\\x27/g,"")+'\\')">שם</button>';
+      btns+='<button class="ghost sm" onclick="resetAccess(\\''+u.id+'\\',\\''+u.name.replace(/\\x27/g,"")+'\\')">🔄 איפוס גישה</button>';
       btns+='<button class="'+(u.active?'danger':'ghost')+' sm" onclick="toggle(\\''+u.id+'\\','+(!u.active)+')">'+(u.active?'השבת':'הפעל')+'</button>';
       btns+='<button class="danger sm" onclick="del(\\''+u.id+'\\',\\''+u.name.replace(/\\x27/g,"")+'\\')">מחק</button>';}
     div.innerHTML='<div class="top"><span class="name">'+u.name+'</span><span class="pill '+(u.active?'on':'off')+'">'+(u.active?'פעיל':'מושבת')+'</span></div>'+codeInfo+nfcInfo+'<div class="btns">'+btns+'</div>';
@@ -455,6 +515,7 @@ async function addUser(){const name=document.getElementById('name').value.trim()
 async function toggle(id,active){await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active})});loadUsers();}
 async function rename(id,cur){const name=prompt('שם חדש:',cur);if(name&&name.trim()){await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name.trim()})});loadUsers();}}
 async function del(id,name){if(confirm('למחוק את '+name+'?')){await fetch('/api/users/'+id,{method:'DELETE'});loadUsers();}}
+async function resetAccess(id,name){if(confirm('לאפס גישה ל'+name+'?\\nה-QR הישן וכל קוד ישן יפסיקו לעבוד, וייווצר QR חדש.')){await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({resetAccess:true})});loadUsers();alert('הגישה אופסה ✓ שלח למשתמש את ה-QR החדש (כפתור QR/וואטסאפ).');}}
 async function setNfc(id){const nfcId=prompt('מזהה כרטיס/צ׳יפ NFC (UID). ריק = הסרה:','');if(nfcId===null)return;await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nfcId:nfcId.trim()})});loadUsers();}
 async function setWindow(id){const ans=prompt('חלון זמן. "תמיד" לגישה חופשית.\\nדוגמה: 0,1,2,3,4 08:00 18:00','תמיד');if(ans===null)return;let win=null;if(ans.trim()!=='תמיד'){const pr=ans.trim().split(/\\s+/);win={days:(pr[0]||'').split(',').map(x=>parseInt(x)).filter(x=>!isNaN(x)),from:pr[1]||'00:00',to:pr[2]||'23:59'};}await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({window:win})});loadUsers();}
 async function issueCode(id){
@@ -504,4 +565,4 @@ async function tick(){try{const r=await (await fetch('/api/qr/${user.id}')).json
   qr.clear();qr.makeCode(r.payload);document.getElementById('sec').textContent=r.secondsLeft;document.getElementById('bar').style.width=(r.secondsLeft/${STEP_SECONDS}*100)+'%';}catch(e){}}
 tick();setInterval(tick,1000);
 </script>`);
-    }
+        }
