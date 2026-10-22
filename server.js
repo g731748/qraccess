@@ -153,6 +153,9 @@ const server = http.createServer(async (req, res) => {
   }
   if (p === '/api/logout') return send(res, 200, { ok: true }, 'application/json', { 'Set-Cookie': 'qrsess=; Path=/; Max-Age=0' });
 
+  // PWA manifest — מאפשר "הוספה למסך הבית" כמו אפליקציה
+  if (p === '/manifest.json') return send(res, 200, { name: 'מיכאל מערכות — בקרת כניסה', short_name: 'בקרת כניסה', start_url: '/', display: 'standalone', background_color: '#185fa5', theme_color: '#185fa5', icons: [{ src: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192"><rect width="192" height="192" rx="40" fill="#185fa5"/><text x="96" y="130" font-size="96" text-anchor="middle" fill="#fff">🔑</text></svg>'), sizes: '192x192', type: 'image/svg+xml' }] }, 'application/manifest+json');
+
   // ===== QR עובד (ציבורי) =====
   if (p.startsWith('/q/')) { const user = db.users[p.split('/')[2]]; if (!user) return send(res, 404, 'לא נמצא', 'text/plain'); return send(res, 200, qrPage(user), 'text/html'); }
   if (p.startsWith('/api/qr/')) {
@@ -334,48 +337,59 @@ initStorage().then(() => {
 function shell(title, body, head = '') {
   return `<!doctype html><html dir="rtl" lang="he"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<meta name="theme-color" content="#1f3a5f"><title>${title}</title>
+<meta name="theme-color" content="#185fa5"><title>${title}</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>${head}
 <style>
-  :root{--bg:#f4f6f9;--card:#fff;--ink:#1a2b3c;--muted:#64748b;--brand:#1f3a5f;--brand2:#2c5282;--ok:#1b8a4b;--bad:#c0392b;--line:#e2e8f0}
+  :root{--bg:#f2f5f9;--card:#fff;--ink:#17202e;--muted:#6b7a90;--brand:#185fa5;--brand-dark:#0c447c;--brand-soft:#e9f1fb;--ok:#1b8a4b;--bad:#d14343;--line:#e7edf4;--shadow:0 2px 12px rgba(16,42,76,.06)}
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-  body{font-family:Arial,system-ui,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:14px;font-size:16px}
-  .wrap{max-width:820px;margin:0 auto}
-  h1{color:var(--brand);font-size:21px;margin:6px 0 2px}h3{margin:0 0 10px}
-  .sub{color:var(--muted);font-size:13px;margin:0 0 14px}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:15px;margin-bottom:13px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
-  button{font-family:inherit;font-size:16px;border:0;border-radius:11px;padding:13px 18px;cursor:pointer;min-height:48px}
-  .primary{background:var(--brand);color:#fff;width:100%}.ghost{background:#eef3f8;color:var(--brand)}
-  .danger{background:#fdeaea;color:var(--bad)}.wa{background:#25d366;color:#fff}
-  .sm{padding:9px 13px;font-size:14px;min-height:40px;width:auto}
-  input,select{font-family:inherit;font-size:16px;padding:12px;border:1px solid var(--line);border-radius:11px;width:100%;min-height:48px;background:#fff}
+  body{font-family:'Heebo',system-ui,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:14px;font-size:16px;line-height:1.5}
+  .wrap{max-width:760px;margin:0 auto}
+  h1{color:var(--ink);font-size:22px;font-weight:700;margin:6px 0 2px}h3{margin:0 0 12px;font-weight:700;font-size:17px}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:14px;box-shadow:var(--shadow)}
+  button{font-family:inherit;font-size:16px;font-weight:500;border:0;border-radius:12px;padding:13px 18px;cursor:pointer;min-height:48px;transition:transform .06s,background .15s}
+  button:active{transform:scale(.97)}
+  .primary{background:var(--brand);color:#fff;width:100%}.primary:active{background:var(--brand-dark)}
+  .ghost{background:var(--brand-soft);color:var(--brand-dark)}
+  .danger{background:#fcebeb;color:var(--bad)}.wa{background:#25d366;color:#fff}
+  .sm{padding:9px 14px;font-size:14px;min-height:40px;width:auto}
+  input,select{font-family:inherit;font-size:16px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;width:100%;min-height:48px;background:#fbfcfe;transition:border .15s}
+  input:focus,select:focus{outline:0;border-color:var(--brand);background:#fff}
   .row{display:flex;gap:9px;align-items:center}.wrap2{flex-wrap:wrap}
-  .item{border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}
+  .item{border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:11px;background:#fff}
   .item .top{display:flex;justify-content:space-between;align-items:center;gap:8px}
-  .item .name{font-weight:bold;font-size:17px}
-  .btns{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}
-  .pill{display:inline-block;padding:3px 11px;border-radius:999px;font-size:12px}
-  .on{background:#e6f6ec;color:var(--ok)}.off{background:#f1f5f9;color:var(--muted)}
-  .g{color:var(--ok);font-weight:bold}.r{color:var(--bad);font-weight:bold}
-  a.link{color:var(--brand2);text-decoration:none;font-size:14px;font-weight:bold}
-  .nav{display:flex;gap:9px;margin-bottom:13px;flex-wrap:wrap;align-items:center}
-  .nav a,.nav span.badge{background:#fff;border:1px solid var(--line);border-radius:10px;padding:9px 13px;color:var(--brand);text-decoration:none;font-size:14px}
-  .nav .ver{margin-right:auto;color:var(--muted);font-size:12px}
+  .item .name{font-weight:700;font-size:17px}
+  .btns{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}
+  .pill{display:inline-block;padding:4px 12px;border-radius:999px;font-size:12px;font-weight:500}
+  .on{background:#e4f6ec;color:var(--ok)}.off{background:#eef2f7;color:var(--muted)}
+  .g{color:var(--ok);font-weight:700}.r{color:var(--bad);font-weight:700}
+  a.link{color:var(--brand);text-decoration:none;font-size:14px;font-weight:500}
+  .nav{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center}
+  .nav a,.nav span.badge{background:#fff;border:1px solid var(--line);border-radius:11px;padding:9px 14px;color:var(--brand-dark);text-decoration:none;font-size:14px;font-weight:500;box-shadow:var(--shadow)}
+  .nav .badge{background:var(--brand-soft);border-color:transparent}
+  .nav .ver{margin-right:auto;color:var(--muted);font-size:12px;box-shadow:none;border:0;background:transparent}
   .muted{color:var(--muted);font-size:12px}
-  .perm{display:flex;align-items:center;gap:8px;padding:7px 0;font-size:15px;cursor:pointer}
+  .perm{display:flex;align-items:center;gap:8px;padding:9px 0;font-size:15px;cursor:pointer;border-bottom:1px solid var(--line)}
+  .perm:last-child{border-bottom:0}
   .perm input{width:auto;min-height:auto;transform:scale(1.3);margin-left:4px}
-  .logline{display:flex;justify-content:space-between;padding:9px 2px;border-bottom:1px solid var(--line);font-size:14px;gap:8px}
+  .logline{display:flex;justify-content:space-between;padding:10px 2px;border-bottom:1px solid var(--line);font-size:14px;gap:8px}
+  .logline:last-child{border-bottom:0}
   label{font-size:14px;color:var(--muted)}
-  /* stats */
-  .stats{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:13px}
-  .stat{flex:1;min-width:95px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:13px;text-align:center}
-  .stat .n{font-size:26px;font-weight:bold;color:var(--brand)}
+  .stats{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+  .stat{flex:1;min-width:95px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;text-align:center;box-shadow:var(--shadow)}
+  .stat .n{font-size:28px;font-weight:700;color:var(--brand)}
   .stat .l{font-size:12px;color:var(--muted);margin-top:3px}
-  /* modal */
-  .modal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;padding:16px;z-index:50}
+  .openbtn{width:150px;height:150px;border-radius:50%;background:var(--brand);color:#fff;font-size:17px;font-weight:500;border:0;cursor:pointer;box-shadow:0 6px 20px rgba(24,95,165,.35);display:inline-flex;flex-direction:column;align-items:center;justify-content:center;gap:6px}
+  .openbtn:active{transform:scale(.95);background:var(--brand-dark)}
+  .openring{width:186px;height:186px;border-radius:50%;background:#fff;box-shadow:var(--shadow);display:inline-flex;align-items:center;justify-content:center;margin:4px auto}
+  .modal{position:fixed;inset:0;background:rgba(16,32,52,.5);display:none;align-items:flex-end;justify-content:center;padding:0;z-index:50}
   .modal.show{display:flex}
-  .modal .box{background:#fff;border-radius:16px;padding:18px;max-width:420px;width:100%;max-height:85vh;overflow:auto}
-  .modal h3{margin:0 0 12px}
+  .modal .box{background:#fff;border-radius:20px 20px 0 0;padding:20px 18px 26px;max-width:480px;width:100%;max-height:88vh;overflow:auto;box-shadow:0 -4px 24px rgba(0,0,0,.15)}
+  @media(min-width:520px){.modal{align-items:center;padding:16px}.modal .box{border-radius:20px}}
+  .modal h3{margin:0 0 14px}
 </style></head><body><div class="wrap">${body}</div>
 <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
 <script>
@@ -388,10 +402,14 @@ function waLink(text){return 'https://wa.me/?text='+encodeURIComponent(text);}
 
 function loginPage() {
   return shell('התחברות', `
-<div style="height:40px"></div>
+<div style="height:36px"></div>
+<div style="text-align:center;margin-bottom:18px">
+  <div style="width:76px;height:76px;border-radius:22px;background:var(--brand);display:inline-flex;align-items:center;justify-content:center;font-size:38px;box-shadow:0 6px 20px rgba(24,95,165,.35)">🔑</div>
+  <h1 style="margin:14px 0 2px">מיכאל מערכות</h1>
+  <p class="sub" style="margin:0">מערכת בקרת כניסה</p>
+</div>
 <div class="card" style="max-width:380px;margin:0 auto">
-  <h1 style="text-align:center">בקרת כניסה</h1><p class="sub" style="text-align:center">התחברות</p>
-  <div style="display:flex;flex-direction:column;gap:11px">
+  <div style="display:flex;flex-direction:column;gap:12px">
     <input id="user" placeholder="שם משתמש" autocomplete="username">
     <input id="pass" type="password" placeholder="סיסמה" autocomplete="current-password">
     <button class="primary" onclick="login()">התחבר</button>
@@ -531,10 +549,10 @@ function adminPage() {
 <div class="nav"><span class="badge">🏢 <span id="tname">…</span></span><a href="#" onclick="changeMyPass();return false;">🔑 שנה סיסמה</a><a href="#" onclick="logout();return false;">התנתק</a><span class="ver">גרסה <span id="ver">…</span></span></div>
 <h1 id="title">ניהול כניסה</h1><p class="sub" id="whoami"></p>
 
-<div class="card" id="remoteCard" style="display:none;text-align:center">
-  <button onclick="remoteOpen()" style="width:120px;height:120px;border-radius:50%;background:#185fa5;color:#fff;font-size:15px;border:0;cursor:pointer">🔓<br>פתח דלת</button>
-  <div class="muted" style="margin-top:8px">פתיחה מרחוק</div>
-  <div id="remoteStatus" style="margin-top:6px;font-size:14px"></div>
+<div class="card" id="remoteCard" style="display:none;text-align:center;padding:22px 16px">
+  <div class="openring"><button class="openbtn" onclick="remoteOpen()"><span style="font-size:34px">🔓</span>פתח דלת</button></div>
+  <div class="muted" style="margin-top:4px">לחיצה לפתיחה מרחוק</div>
+  <div id="remoteStatus" style="margin-top:8px;font-size:15px"></div>
 </div>
 
 <div class="stats" id="stats"></div>
@@ -754,4 +772,4 @@ async function tick(){try{const r=await (await fetch('/api/qr/${user.id}')).json
   qr.clear();qr.makeCode(r.payload);document.getElementById('sec').textContent=r.secondsLeft;document.getElementById('bar').style.width=(r.secondsLeft/${STEP_SECONDS}*100)+'%';}catch(e){}}
 tick();setInterval(tick,1000);
 </script>`);
-  }
+        }
