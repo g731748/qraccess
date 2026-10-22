@@ -1,21 +1,18 @@
 #!/usr/bin/env node
 /*
- * QR Access — מערכת בקרת כניסה (גרסה 4)
+ * QR Access — מערכת בקרת כניסה (גרסה 6)
  * =========================================
  * עצמאית, 100% בבעלותך. ללא תלות בספק.
  *
- * חדש בגרסה 4:
- *   • תיקון: עריכת הרשאות מנהל עם תיבות סימון (במקום הקלדה) — נוח ועובד
- *   • שינוי סיסמה + מכסת משתמשים למנהל, בלחיצה
- *   • דשבורד עם מספרים (כניסות היום, מורשות/נדחו, משתמשים פעילים)
- *   • חיפוש משתמשים
- *   • כפתור "שלח בוואטסאפ" לקוד/קישור QR
- *   • "קוד אורח מהיר" — חד-פעמי בלחיצה אחת
+ * חדש בגרסה 6:
+ *   • מסד נתונים קבוע (PostgreSQL) — הלקוחות נשמרים לתמיד,
+ *     ושום עדכון גרסה לא מוחק אותם יותר!
+ *   • אם DATABASE_URL מוגדר → נשמר ב-Postgres. אחרת → קובץ מקומי (לפיתוח).
+ *
+ * גרסאות קודמות: היררכיית הרשאות, קודים, NFC, חלונות זמן,
+ *   דשבורד, חיפוש, וואטסאפ, ניהול סיסמאות ואיפוס.
  *
  * רמות: Super Admin (אתה) → Admin לקוח → משתמשי קצה
- * אמצעי כניסה: QR מתחלף, קוד (קבוע/זמני/חד-פעמי), NFC, חלונות זמן
- *
- * Node בלבד.  node server.js
  */
 
 const http = require('http');
@@ -23,9 +20,10 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = '5.0';
+const VERSION = '6.0';
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'data', 'db.json');
+const DATABASE_URL = process.env.DATABASE_URL || '';
 const STEP_SECONDS = 30, TOLERANCE = 1;
 
 const SUPER_USER = process.env.SUPER_USER || 'michael';
@@ -45,9 +43,39 @@ const PERMS = {
 };
 
 function freshDB() { return { tenants: {}, admins: {}, users: {}, doors: {}, log: [] }; }
-function loadDB() { try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); } catch { return freshDB(); } }
-function saveDB() { fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true }); fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2)); }
-let db = loadDB();
+
+/* ========= שכבת אחסון ========= *
+ * db נשמר בזיכרון כמקור האמת. בהפעלה טוענים אותו ממסד הנתונים (או מקובץ).
+ * כל שמירה כותבת את כל האובייקט בחזרה. עם Postgres — שורה אחת עם JSON.
+ */
+let db = freshDB();
+let pgPool = null;           // מאותחל ב-initStorage אם יש DATABASE_URL
+let saveTimer = null;        // דחיית כתיבות כדי לא להציף את ה-DB
+
+async function initStorage() {
+  if (DATABASE_URL) {
+    const { Pool } = require('pg');
+    pgPool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
+    await pgPool.query('CREATE TABLE IF NOT EXISTS store (id INT PRIMARY KEY, data JSONB)');
+    const r = await pgPool.query('SELECT data FROM store WHERE id=1');
+    if (r.rows.length) { db = r.rows[0].data; console.log('  אחסון: Postgres (נטען מסד קיים)'); }
+    else { db = freshDB(); await pgPool.query('INSERT INTO store (id,data) VALUES (1,$1)', [JSON.stringify(db)]); console.log('  אחסון: Postgres (מסד חדש נוצר)'); }
+  } else {
+    try { db = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); } catch { db = freshDB(); }
+    console.log('  אחסון: קובץ מקומי (פיתוח)');
+  }
+}
+
+async function persist() {
+  if (pgPool) { try { await pgPool.query('UPDATE store SET data=$1 WHERE id=1', [JSON.stringify(db)]); } catch (e) { console.error('persist DB error:', e.message); } }
+  else { try { fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true }); fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2)); } catch (e) { console.error('persist file error:', e.message); } }
+}
+
+// saveDB נשאר סינכרוני לקריאה מהקוד הקיים — מתזמן כתיבה ברקע (debounce קצר)
+function saveDB() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => { saveTimer = null; persist(); }, 150);
+}
 
 function hashPass(pw, salt) { return crypto.pbkdf2Sync(pw, salt, 60000, 32, 'sha256').toString('hex'); }
 function makePass(pw) { const salt = crypto.randomBytes(12).toString('hex'); return { salt, passHash: hashPass(pw, salt) }; }
@@ -239,7 +267,10 @@ const server = http.createServer(async (req, res) => {
   send(res, 404, 'not found', 'text/plain');
 });
 
-server.listen(PORT, () => console.log(`\n  QR Access v${VERSION} — פורט ${PORT}\n  Super: ${SUPER_USER} ${SUPER_PASSWORD === 'michael2026' ? '(ברירת מחדל — שנה!)' : ''}\n`));
+// מפעילים את השרת רק אחרי שהאחסון מוכן (טעינת הנתונים הקיימים)
+initStorage().then(() => {
+  server.listen(PORT, () => console.log(`\n  QR Access v${VERSION} — פורט ${PORT}\n  Super: ${SUPER_USER} ${SUPER_PASSWORD === 'michael2026' ? '(ברירת מחדל — שנה!)' : ''}\n`));
+}).catch(e => { console.error('שגיאת אתחול אחסון:', e.message); process.exit(1); });
 
 // ================= HTML =================
 function shell(title, body, head = '') {
