@@ -23,7 +23,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = '15.0';
+const VERSION = '16.0';
 // סוגי תגי NFC/RFID נתמכים
 const TAG_TYPES = { '125khz': 'תג 125kHz (EM/קירבה)', '13.56mhz': 'תג 13.56MHz (Mifare/NFC)' };
 
@@ -400,6 +400,31 @@ const server = http.createServer(async (req, res) => {
       saveDB(); return send(res, 200, { ok: true });
     }
     if (p === '/api/log') { if (!has('view_log')) return send(res, 403, { error: 'אין הרשאה' }); return send(res, 200, db.log.filter(l => l.tenantId === tid).slice(0, 100)); }
+    if (p === '/api/dashboard' && m === 'GET') {
+      const logs = db.log.filter(l => l.tenantId === tid);
+      const startToday = new Date(); startToday.setHours(0, 0, 0, 0); const t0 = startToday.getTime();
+      const weekStart = t0 - 6 * 86400000;
+      const today = logs.filter(l => l.ts >= t0);
+      const grantedToday = today.filter(l => l.result === 'granted').length;
+      const deniedToday = today.length - grantedToday;
+      const weekG = logs.filter(l => l.ts >= weekStart && l.result === 'granted');
+      const dayCounts = [0, 0, 0, 0, 0, 0, 0];
+      weekG.forEach(l => { dayCounts[new Date(l.ts).getDay()]++; });
+      const doorCounts = {}; let totalDoorEntries = 0;
+      weekG.forEach(l => { if (l.doorId) { doorCounts[l.doorId] = (doorCounts[l.doorId] || 0) + 1; totalDoorEntries++; } });
+      let busiest = null, bmax = 0; Object.keys(doorCounts).forEach(d => { if (doorCounts[d] > bmax) { bmax = doorCounts[d]; busiest = d; } });
+      const doors = Object.values(db.doors).filter(d => d.tenantId === tid);
+      const recentDenied = today.filter(l => l.result !== 'granted');
+      return send(res, 200, {
+        grantedToday, deniedToday, weekGranted: weekG.length, dayCounts,
+        doorsOnline: doors.filter(d => d.online).length, doorsTotal: doors.length,
+        offlineDoors: doors.filter(d => !d.online).map(d => d.name),
+        deniedTimes: recentDenied.slice(0, 5).map(l => new Date(l.ts).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })),
+        deniedDoor: recentDenied.length && recentDenied[0].doorId && db.doors[recentDenied[0].doorId] ? db.doors[recentDenied[0].doorId].name : '',
+        busiest: busiest ? { name: db.doors[busiest] ? db.doors[busiest].name : 'דלת', pct: totalDoorEntries ? Math.round(bmax / totalDoorEntries * 100) : 0 } : null,
+        recent: logs.slice(0, 8).map(l => ({ name: l.userName, method: l.method, result: l.result, ts: l.ts, doorName: l.doorId && db.doors[l.doorId] ? db.doors[l.doorId].name : '' }))
+      });
+    }
     if (p === '/' || p === '/admin') return send(res, 200, adminPage(), 'text/html');
   }
 
@@ -566,6 +591,33 @@ function shell(title, body, head = '') {
   .dpick{display:flex;align-items:center;gap:10px;padding:11px 2px;border-bottom:1px solid var(--line);font-size:15px}
   .dpick:last-child{border-bottom:0}
   .dpick input{width:auto;min-height:auto;transform:scale(1.3);margin-left:6px}
+  /* ===== dashboard ===== */
+  .dash-h{font-size:19px;margin:2px 2px 12px;font-weight:800}
+  .dstats{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-bottom:14px}
+  .dstat{background:#fff;border:1px solid var(--line);border-radius:16px;padding:14px;box-shadow:var(--shadow)}
+  .dstat .n{font-size:26px;font-weight:800;line-height:1}
+  .dstat .l{font-size:12px;color:var(--muted);margin-top:4px;font-weight:500}
+  .dpanel{background:#fff;border:1px solid var(--line);border-radius:18px;padding:16px;margin-bottom:14px;box-shadow:var(--shadow)}
+  .dpanel h3{font-size:15px;margin:0 0 14px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
+  .dpanel h3 .mut{font-size:12px;color:var(--muted);font-weight:500;cursor:pointer}
+  .chart{display:flex;align-items:flex-end;justify-content:space-between;gap:7px;height:112px}
+  .bar{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;height:100%}
+  .bar .track{flex:1;width:100%;display:flex;align-items:flex-end}
+  .bar .fill{width:100%;border-radius:7px 7px 3px 3px;background:linear-gradient(180deg,#5cb6ec,#1f8fd6);min-height:3px;transition:height .4s}
+  .bar.max .fill{background:linear-gradient(180deg,#0b74c4,#075596)}
+  .bar .d{font-size:11px;color:var(--muted);font-weight:600}.bar .v{font-size:10px;color:var(--brand-dark);font-weight:700}
+  .arow{display:flex;align-items:center;gap:11px;padding:11px 0;border-bottom:1px solid var(--line)}
+  .arow:last-child{border-bottom:0}
+  .aic{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .aic.r{background:#fdecec;color:var(--bad)}.aic.a{background:#fdf3e4;color:#d98514}.aic.b{background:var(--brand-soft);color:var(--brand)}
+  .arow .t{flex:1;min-width:0}.arow .t b{font-size:14px;font-weight:700}.arow .t span{font-size:12px;color:var(--muted)}
+  .acti{display:flex;align-items:center;gap:11px;padding:10px 0;border-bottom:1px solid var(--line)}
+  .acti:last-child{border-bottom:0}
+  .acti .av{width:34px;height:34px;border-radius:10px;background:var(--brand-soft);color:var(--brand-dark);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;flex-shrink:0}
+  .acti .av.bad{background:#fdecec;color:#b91c1c}
+  .acti .t{flex:1;min-width:0}.acti .t b{font-size:14px;font-weight:700}.acti .t span{font-size:11.5px;color:var(--muted)}
+  .abadge{font-size:12px;font-weight:700;padding:3px 9px;border-radius:999px;flex-shrink:0}
+  .abadge.g{background:#e7f8ef;color:var(--ok)}.abadge.r{background:#fdecec;color:var(--bad)}
 </style></head><body><div class="wrap">${body}</div>
 <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
 <script>
@@ -741,7 +793,16 @@ function adminPage() {
   <button class="iconbtn" onclick="showView('settings')" aria-label="הגדרות"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 0 1-4 0v-.1A1.6 1.6 0 0 0 7 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0-1.1-2.7H1a2 2 0 0 1 0-4h.1A1.6 1.6 0 0 0 2.6 7a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H7a1.6 1.6 0 0 0 1-1.5V1a2 2 0 0 1 4 0v.1a1.6 1.6 0 0 0 2.7 1.1 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V7a1.6 1.6 0 0 0 1.5 1H23a2 2 0 0 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z" transform="scale(.8) translate(3 3)"/></svg></button>
 </div>
 
-<div id="viewDoors">
+<div id="viewDash">
+  <h1 class="dash-h">לוח בקרה</h1>
+  <div class="dstats" id="dStats"></div>
+  <div class="dpanel"><h3>כניסות השבוע <span class="mut" id="dWeekTot"></span></h3><div class="chart" id="dChart"></div></div>
+  <div class="dpanel" id="dAlertsPanel" style="display:none"><h3>התראות</h3><div id="dAlerts"></div></div>
+  <div class="dpanel" id="dBusyPanel" style="display:none"><h3>הדלת העמוסה</h3><div id="dBusy"></div></div>
+  <div class="dpanel"><h3>פעילות אחרונה <span class="mut" id="dAllLog" onclick="showView('log')">כל היומן ›</span></h3><div id="dRecent"></div></div>
+</div>
+
+<div id="viewDoors" style="display:none">
   <div class="dhead"><h2>דלתות ובקרים</h2><button class="daddbtn" onclick="addDoor()" aria-label="הוסף דלת"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button></div>
   <div class="dgrid" id="doorsGrid"></div>
   <div id="doorsEmpty" class="muted" style="text-align:center;padding:26px 14px;display:none">אין עדיין דלתות.<br>לחץ על <b>+</b> למעלה כדי להוסיף את הדלת הראשונה.</div>
@@ -779,9 +840,9 @@ function adminPage() {
 </div>
 
 <div class="tabbar">
-  <button id="tab-doors" class="act" onclick="showView('doors')"><span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M15 12h.01"/></svg></span>דלתות</button>
+  <button id="tab-dash" class="act" onclick="showView('dash')"><span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13h6V4H4zM14 20h6v-9h-6zM14 7h6V4h-6zM4 20h6v-3H4z"/></svg></span>סקירה</button>
+  <button id="tab-doors" onclick="showView('doors')"><span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M15 12h.01"/></svg></span>דלתות</button>
   <button id="tab-list" onclick="showView('list')"><span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 18.5V20"/><circle cx="10" cy="8" r="3.4"/><path d="M20 20v-1.5a3.5 3.5 0 0 0-2.7-3.4"/><path d="M15.5 4.6a3.4 3.4 0 0 1 0 6.6"/></svg></span>משתמשים</button>
-  <button id="tab-log" onclick="showView('log')"><span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h12"/><path d="M8 12h12"/><path d="M8 18h12"/><circle cx="4" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="4" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="4" cy="18" r="1" fill="currentColor" stroke="none"/></svg></span>יומן</button>
   <button id="tab-settings" onclick="showView('settings')"><span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M21.5 12h-3M5.5 12h-3M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1M18.4 18.4l-2.1-2.1M7.7 7.7 5.6 5.6"/></svg></span>הגדרות</button>
 </div>
 
@@ -818,10 +879,10 @@ const IC={
  chev:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 6l-6 6 6 6"/></svg>'
 };
 function showView(v){
-  ['Doors','DoorDetail','List','User','Log','Settings'].forEach(x=>{const el=document.getElementById('view'+x);if(el)el.style.display=(x.toLowerCase()===v)?'':'none';});
+  ['Dash','Doors','DoorDetail','List','User','Log','Settings'].forEach(x=>{const el=document.getElementById('view'+x);if(el)el.style.display=(x.toLowerCase()===v)?'':'none';});
+  document.getElementById('tab-dash').classList.toggle('act',v==='dash'||v==='log');
   document.getElementById('tab-doors').classList.toggle('act',v==='doors'||v==='doordetail');
   document.getElementById('tab-list').classList.toggle('act',v==='list'||v==='user');
-  document.getElementById('tab-log').classList.toggle('act',v==='log');
   document.getElementById('tab-settings').classList.toggle('act',v==='settings');
   window.scrollTo(0,0);
 }
@@ -836,9 +897,8 @@ async function init(){
   if(can('manage_users'))document.getElementById('addcard').style.display='block';
   if(can('issue_code'))document.getElementById('guestWrap').style.display='block';
   if(can('remote_open'))document.getElementById('remoteCard').style.display='block';
-  if(!can('view_log'))document.getElementById('tab-log').style.display='none';
-  await loadUsers(); await loadDoors(); if(can('view_log'))loadLog();
-  showView('doors');
+  await loadUsers(); await loadDoors(); await loadDash(); if(can('view_log'))loadLog();
+  showView('dash');
 }
 async function remoteOpen(){
   const st=document.getElementById('remoteStatus'); st.textContent='⏳ פותח...';
@@ -978,6 +1038,34 @@ function addUserToDoor(id){
 async function setDoorUser(doorId,userId,allow){
   await fetch('/api/doors/'+doorId+'/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId,allow:!!allow})});
   await loadDoors();
+}
+let DASH=null;
+async function loadDash(){ try{DASH=await (await fetch('/api/dashboard')).json();}catch(e){DASH=null;} renderDash(); }
+function timeAgo(ts){const s=Math.floor((Date.now()-ts)/1000); if(s<60)return 'עכשיו'; const m=Math.floor(s/60); if(m<60)return 'לפני '+m+' דק׳'; const h=Math.floor(m/60); if(h<24)return 'לפני '+h+' ש׳'; return new Date(ts).toLocaleDateString('he-IL');}
+function renderDash(){
+  if(!DASH)return; const D=DASH;
+  const al2=document.getElementById('dAllLog'); if(al2)al2.style.display=can('view_log')?'':'none';
+  document.getElementById('dStats').innerHTML=
+    '<div class="dstat"><div class="n" style="color:#185fa5">'+D.grantedToday+'</div><div class="l">כניסות היום</div></div>'+
+    '<div class="dstat"><div class="n" style="color:#1b8a4b">'+D.weekGranted+'</div><div class="l">כניסות השבוע</div></div>'+
+    '<div class="dstat"><div class="n" style="color:#d14343">'+D.deniedToday+'</div><div class="l">נדחו היום</div></div>'+
+    '<div class="dstat"><div class="n" style="color:#185fa5">'+D.doorsOnline+'/'+D.doorsTotal+'</div><div class="l">דלתות מחוברות</div></div>';
+  document.getElementById('dWeekTot').textContent='סה״כ '+D.weekGranted;
+  const dn=['א','ב','ג','ד','ה','ו','ש']; let mx=1; D.dayCounts.forEach(function(c){if(c>mx)mx=c;});
+  let chart=''; for(let i=0;i<7;i++){const c=D.dayCounts[i];const h=Math.round(c/mx*100); chart+='<div class="bar'+(c===mx&&c>0?' max':'')+'"><div class="track"><div class="fill" style="height:'+(c>0?Math.max(h,6):2)+'%"></div></div><div class="v">'+c+'</div><div class="d">'+dn[i]+'</div></div>';}
+  document.getElementById('dChart').innerHTML=chart;
+  let al='';
+  if(D.deniedToday>0)al+='<div class="arow"><span class="aic r"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg></span><div class="t"><b>'+D.deniedToday+' כניסות נדחו היום</b><span>'+(D.deniedDoor?D.deniedDoor+' · ':'')+((D.deniedTimes||[]).join(', '))+'</span></div></div>';
+  (D.offlineDoors||[]).forEach(function(nm){al+='<div class="arow"><span class="aic a"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 2 20h20L12 3z"/><path d="M12 10v4M12 17h.01"/></svg></span><div class="t"><b>דלת לא מחוברת</b><span>'+nm+'</span></div></div>';});
+  document.getElementById('dAlertsPanel').style.display=al?'':'none'; document.getElementById('dAlerts').innerHTML=al;
+  if(D.busiest){document.getElementById('dBusyPanel').style.display='';
+    document.getElementById('dBusy').innerHTML='<div style="display:flex;align-items:center;gap:12px"><span class="aic b"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M15 12h.01"/></svg></span><div style="flex:1"><b style="font-size:14.5px">'+D.busiest.name+'</b><div style="font-size:12px;color:#6a7891">'+D.busiest.pct+'% מכלל הכניסות השבוע</div></div></div>';
+  } else document.getElementById('dBusyPanel').style.display='none';
+  const mth={qr:'QR',code:'קוד',nfc:'תג',remote:'מרחוק'};
+  let rec=(D.recent&&D.recent.length)?'':'<div class="muted" style="text-align:center;padding:14px">אין עדיין פעילות.</div>';
+  (D.recent||[]).forEach(function(l){const ok=l.result==='granted';const ini=((l.name||'?').trim().charAt(0))||'?';
+    rec+='<div class="acti"><span class="av'+(ok?'':' bad')+'">'+(ok?ini:'✕')+'</span><div class="t"><b>'+l.name+'</b><span>'+(l.doorName?l.doorName+' · ':'')+(mth[l.method]||l.method)+' · '+timeAgo(l.ts)+'</span></div><span class="abadge '+(ok?'g':'r')+'">'+(ok?'✓':'✕')+'</span></div>';});
+  document.getElementById('dRecent').innerHTML=rec;
 }
 async function loadLog(){const log=await (await fetch('/api/log')).json();const lb=document.getElementById('log');lb.innerHTML=log.length?'':'<div class="muted">אין כניסות.</div>';
   log.forEach(l=>{const d=document.createElement('div');d.className='logline';const t=new Date(l.ts).toLocaleString('he-IL');const mth=({qr:'QR',code:'קוד',nfc:'NFC'}[l.method]||l.method)+(l.method==='nfc'&&l.tagType?' '+({'125khz':'125kHz','13.56mhz':'13.56MHz'}[l.tagType]||''):'');
